@@ -19,22 +19,25 @@ import {IWAVAX} from "src/interfaces/IWAVAX.sol";
 import {OwnableUpgradeable} from "openzeppelin-contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {IWAVAX} from "src/interfaces/IWAVAX.sol";
 
-
-/** 
- * @notice Vault is an ERC20 implementation which deposits a token to a farm or other contract, 
+/**
+ * @notice Vault is an ERC20 implementation which deposits a token to a farm or other contract,
  * and autocompounds in value for all users. If there has been too much time since the last deliberate
- * reinvestment, the next action will automatically be a reinvestent. This contract is inherited from 
- * the Router contract so it can swap to autocompound. It is inherited by various Vault implementations 
- * to specify how rewards are claimed and how tokens are deposited into different protocols. 
+ * reinvestment, the next action will automatically be a reinvestent. This contract is inherited from
+ * the Router contract so it can swap to autocompound. It is inherited by various Vault implementations
+ * to specify how rewards are claimed and how tokens are deposited into different protocols.
  */
 
-contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+contract aUSTVault is
+    ERC20Upgradeable,
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable
+{
     using SafeTransferLib for IERC20;
 
-    // Min swap to rid of edge cases with untracked rewards for small deposits. 
-    uint256 constant public MIN_SWAP = 1e16;
-    uint256 constant public MIN_FIRST_MINT = 1e12; // Require substantial first mint to prevent exploits from rounding errors
-    uint256 constant public FIRST_DONATION = 1e8; // Lock in first donation to prevent exploits from rounding errors
+    // Min swap to rid of edge cases with untracked rewards for small deposits.
+    uint256 public constant MIN_SWAP = 1e16;
+    uint256 public constant MIN_FIRST_MINT = 1e12; // Require substantial first mint to prevent exploits from rounding errors
+    uint256 public constant FIRST_DONATION = 1e8; // Lock in first donation to prevent exploits from rounding errors
 
     uint256 public underlyingDecimal; //decimal of underlying token
     ERC20 public underlying; // the underlying token
@@ -51,7 +54,12 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     event Reinvested(address caller, uint256 preCompound, uint256 postCompound);
     event CallerFeePaid(address caller, uint256 amount);
     event AdminFeePaid(address caller, uint256 amount);
-    event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
+    event Deposit(
+        address indexed caller,
+        address indexed owner,
+        uint256 assets,
+        uint256 shares
+    );
 
     event Withdraw(
         address indexed caller,
@@ -71,7 +79,7 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     ///////////////////////////////////////////////////////////////////////////////
     // Modified storage chunk
 
-    IxAnchor public xAnchor;   
+    IxAnchor public xAnchor;
     AggregatorV3Interface public priceFeed;
     ISwapFacility public swapper; //Just set to non null value
     ERC20 public UST;
@@ -82,10 +90,12 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     balance is correct. */
     uint256 public lastUSTBalance;
 
-    /* @dev aUST balances are accounted for by balanceOf() calls and must be treated
-    as inherently untrusted because of the time gap between when aUST is made 
-    and when it is actually reflected by the bridge transfer */
+    /* @dev aUST balances are accounted for by balanceOf() calls and can be trusted
+    because users can only interact with compounding, depositing, and redeeming iff
+    the balance is greater than the last recorded aUST balance before recieving 
+    aUST from the bridge. */
     uint256 public lastaUSTBalance;
+    bool public isaUSTBalanceUpdated;
 
     ///////////////////////////////////////////////////////////////////////////////
     uint256 internal constant MAX_INT =
@@ -111,15 +121,16 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
         setFee(_adminFee, _callerFee);
         maxReinvestStale = _maxReinvestStale;
         WAVAX = IWAVAX(_WAVAX);
-        
+
         // Modified chunk
         xAnchor = IxAnchor(_xanchor);
         priceFeed = AggregatorV3Interface(_pricefeed);
         UST = ERC20(_UST);
         UST.approve(_xanchor, MAX_INT);
+
+        isaUSTBalanceUpdated = true;
     }
-    
-    
+
     // Sets fee
     function setFee(uint256 _adminFee, uint256 _callerFee) public onlyOwner {
         require(_adminFee < 10000 && _callerFee < 10000);
@@ -132,60 +143,76 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
         maxReinvestStale = _maxReinvestStale;
     }
 
-    // Sets the address of the BorrowerOperations contract which will have permissions to depositFor. 
+    // Sets the address of the BorrowerOperations contract which will have permissions to depositFor.
     function setBOps(address _BOpsAddress) public onlyOwner {
         BOpsAddress = _BOpsAddress;
     }
 
-    // Sets fee recipient which will get a certain adminFee percentage of reinvestments. 
+    // Sets fee recipient which will get a certain adminFee percentage of reinvestments.
     function setFeeRecipient(address _feeRecipient) public onlyOwner {
         feeRecipient = _feeRecipient;
     }
 
     // DELETED: Reward token functions
 
-    
-    function max(uint a, uint b) internal pure returns (uint256) {
+    function max(uint256 a, uint256 b) internal pure returns (uint256) {
         return a < b ? b : a;
     }
-    function getTrueUnderlyingBalance() public view returns (uint256) {
-        return max(lastaUSTBalance, underlying.balanceOf(address(this)));
+
+    function getUnderlyingBalance() public view returns (uint256) {
+        return underlying.balanceOf(address(this));
     }
 
     /* Returns how much UST 1e18 aUST is worth */
     function _getUSTaUST() internal view returns (uint256) {
-      (
-        /*uint80 roundID*/,
-        int256 price,
-        /*uint256  startedAt*/,
-        /*uint256  timeStamp*/,
-        /*uint80 answeredInRound*/
+        (
+            ,
+            /*uint80 roundID*/
+            int256 price, /*uint256  startedAt*/ /*uint256  timeStamp*/ /*uint80 answeredInRound*/
+            ,
+            ,
+
         ) = priceFeed.latestRoundData();
         return uint256(price);
     }
-    
+
     // How many vault tokens can I get for 1 unit of the underlying * 1e18
     // Can be overriden if underlying balance is not reflected in contract balance
     function receiptPerUnderlying() public view virtual returns (uint256) {
         if (totalSupply == 0) {
-            return 10 ** (18 + 18 - underlyingDecimal);
+            return 10**(18 + 18 - underlyingDecimal);
         }
-        return (1e18 * totalSupply) / getTrueUnderlyingBalance();
+        return (1e18 * totalSupply) / getUnderlyingBalance();
     }
 
     // How many underlying tokens can I get for 1 unit of the vault token * 1e18
     // Can be overriden if underlying balance is not reflected in contract balance
     function underlyingPerReceipt() public view virtual returns (uint256) {
         if (totalSupply == 0) {
-            return 10 ** underlyingDecimal;
+            return 10**underlyingDecimal;
         }
-        return (1e18 * getTrueUnderlyingBalance()) / totalSupply;
+        return (1e18 * getUnderlyingBalance()) / totalSupply;
+    }
+
+    // Checks if aUST balance is stale using previous state and updates if state
+    // is incorrect preventing deposits/withdrawls in case of stale balance.
+    function underlyingBalanceUpdate() public returns (bool) {
+        if (isaUSTBalanceUpdated || getUnderlyingBalance() > lastaUSTBalance) {
+            isaUSTBalanceUpdated = true;
+            return true;
+        }
+        return false;
     }
 
     // Deposit underlying for a given amount of vault tokens. Buys in at the current receipt
-    // per underlying and then transfers it to the original sender. 
-    function deposit(address _to, uint256 _amt) public nonReentrant returns (uint256 receiptTokens) {
+    // per underlying and then transfers it to the original sender.
+    function deposit(address _to, uint256 _amt)
+        public
+        nonReentrant
+        returns (uint256 receiptTokens)
+    {
         require(_amt > 0, "0 tokens");
+        require(underlyingBalanceUpdate(), "aUST balances are stale");
         // Reinvest if it has been a while since last reinvest
         if (block.timestamp > lastReinvestTime + maxReinvestStale) {
             _compound();
@@ -197,46 +224,41 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
             _mint(feeRecipient, FIRST_DONATION);
             receiptTokens -= FIRST_DONATION;
         }
-        require(
-            receiptTokens != 0,
-            "0 received"
-        );
-        SafeTransferLib.safeTransferFrom(
-            UST,
-            msg.sender,
-            address(this),
-            _amt
-        );
+        require(receiptTokens != 0, "0 received");
+
+        SafeTransferLib.safeTransferFrom(UST, msg.sender, address(this), _amt);
         _triggerDepositAction(_amt);
         _mint(_to, receiptTokens);
         emit Deposit(msg.sender, _to, _amt, receiptTokens);
     }
-    
+
     function deposit(uint256 _amt) public returns (uint256) {
         return deposit(msg.sender, _amt);
     }
 
-    // For use in the YETI borrowing protocol, depositFor assumes approval of the underlying token to the router, 
-    // and it is only callable from the BOps contract. 
-    function depositFor(address _borrower, address _to, uint256 _amt) public nonReentrant returns (uint256 receiptTokens) {
+    // For use in the YETI borrowing protocol, depositFor assumes approval of the underlying token to the router,
+    // and it is only callable from the BOps contract.
+    function depositFor(
+        address _borrower,
+        address _to,
+        uint256 _amt
+    ) public nonReentrant returns (uint256 receiptTokens) {
         require(msg.sender == BOpsAddress, "BOps only");
         require(_amt > 0, "0 tokens");
+        require(underlyingBalanceUpdate(), "stale aUST balance, not updated");
+
         // Reinvest if it has been a while since last reinvest
         if (block.timestamp > lastReinvestTime + maxReinvestStale) {
             _compound();
         }
+
         uint256 _toMint = _preDeposit(_amt);
         receiptTokens = (receiptPerUnderlying() * _toMint) / 1e18;
         require(
             receiptTokens != 0,
             "Deposit amount too small, you will get 0 receipt tokens"
         );
-        SafeTransferLib.safeTransferFrom(
-            UST,
-            _borrower,
-            address(this),
-            _amt
-        );
+        SafeTransferLib.safeTransferFrom(UST, _borrower, address(this), _amt);
         _triggerDepositAction(_amt);
         _mint(_to, receiptTokens);
         emit Deposit(_borrower, _to, _amt, receiptTokens);
@@ -264,8 +286,14 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     }
 
     // Withdraw underlying tokens for a given amount of vault tokens
-    function redeem(address _to, uint256 _amt) public virtual nonReentrant returns (uint256 amtToReturn) {
+    function redeem(address _to, uint256 _amt)
+        public
+        virtual
+        nonReentrant
+        returns (uint256 amtToReturn)
+    {
         // require(_amt > 0, "0 tokens");
+        require(underlyingBalanceUpdate(), "aUST balances are stale");
         if (block.timestamp > lastReinvestTime + maxReinvestStale) {
             _compound();
         }
@@ -282,7 +310,8 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
     // Bailout in case compound() breaks
     function emergencyRedeem(uint256 _amt)
-        public nonReentrant
+        public
+        nonReentrant
         returns (uint256 amtToReturn)
     {
         amtToReturn = (underlyingPerReceipt() * _amt) / 1e18;
@@ -304,7 +333,7 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
         }
 
         uint256 allowed = allowance[_from][msg.sender];
-        // Below line should throw if allowance is not enough, or if from is the caller itself. 
+        // Below line should throw if allowance is not enough, or if from is the caller itself.
         if (allowed != type(uint256).max && msg.sender != _from) {
             allowance[_from][msg.sender] = allowed - _amt;
         }
@@ -323,9 +352,8 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     ) external returns (uint256) {
         return redeemFor(_amt, _from, _to);
     }
-    function withdraw(
-        uint256 _amt
-    ) external returns (uint256) {
+
+    function withdraw(uint256 _amt) external returns (uint256) {
         return redeem(msg.sender, _amt);
     }
 
@@ -348,63 +376,57 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
         return lastUSTBalance;
     }
 
-    /* There is a chance _getValueOfUnderlyingPost() < _getValueOfUnderlyingPre()
-        if a large UST deposit is made and compound is called before the aUST arrives
-        in the vault. Hence the compound logic is adjusted to account for this  */
     function _getValueOfUnderlyingPost() internal view returns (uint256) {
-        return _getUSTaUST() * getTrueUnderlyingBalance() / 1e18;
+        return (_getUSTaUST() * getUnderlyingBalance()) / 1e18;
     }
 
     function totalHoldings() public view returns (uint256) {
-        return getTrueUnderlyingBalance();
+        return getUnderlyingBalance();
     }
+
     function _preDeposit(uint256 _amt) internal returns (uint256) {
-        return 1e18 * _amt / _getUSTaUST();
+        return (1e18 * _amt) / _getUSTaUST();
     }
-    
-    function _triggerDepositAction(uint256 amtOfUnderlying) internal  {
+
+    function _triggerDepositAction(uint256 amtOfUnderlying) internal {
         uint256 rate = _getUSTaUST();
-        lastaUSTBalance = getTrueUnderlyingBalance() + (amtOfUnderlying * 1e18 / rate );
-        /* One of two places where UST interest accrual is updated. Ensures monotonic increases 
-        in case newly deposited aUST has not landed yet */
-        lastUSTBalance = rate * lastaUSTBalance / 1e18;
-        xAnchor.depositStable(address(UST), amtOfUnderlying);
+        isaUSTBalanceUpdated = false;
+        lastaUSTBalance = getUnderlyingBalance();
+
+        /* One of two places where UST interest accrual is updated. 
+        Ensures monotonic increases because aUST guaranteed to be updated */
+        lastUSTBalance = (_getUSTaUST() * lastaUSTBalance) / 1e18;
+        //xAnchor.depositStable(address(UST), amtOfUnderlying);
     }
 
     function _triggerWithdrawAction(uint256 amtToReturn) internal {
-        lastaUSTBalance = getTrueUnderlyingBalance() - amtToReturn;
-        lastUSTBalance -= 1e18 * amtToReturn / _getUSTaUST();
+        lastaUSTBalance = getUnderlyingBalance() - amtToReturn;
+        lastUSTBalance -= (1e18 * amtToReturn) / _getUSTaUST();
     }
-    
 
     function _compound() internal returns (uint256) {
         uint256 preCompoundUnderlyingValue = _getValueOfUnderlyingPre();
         uint256 postCompoundUnderlyingValue = _getValueOfUnderlyingPost();
-        /* @dev Removed profit calculation because postCompoundUnderlyingValue 
-        can be < preCompoundUnderlyingValue as mentioned above. */
-        if (postCompoundUnderlyingValue > preCompoundUnderlyingValue) {
-            /* We only consider a successful compound if there is a profit. 
-            Otherwise it will attempt again when aUST has landed in the vault */
-            lastReinvestTime = block.timestamp;
 
-            uint256 profitInUnderlying = postCompoundUnderlyingValue - preCompoundUnderlyingValue;
-            uint256 adminAmt = (profitInUnderlying * adminFee) / 10000;
-            uint256 callerAmt = (profitInUnderlying * callerFee) / 10000;
-            _triggerWithdrawAction(adminAmt + callerAmt);
-            SafeTransferLib.safeTransfer(underlying, feeRecipient, adminAmt);
-            SafeTransferLib.safeTransfer(underlying, msg.sender, callerAmt);
-            emit Reinvested(
-                msg.sender,
-                preCompoundUnderlyingValue,
-                postCompoundUnderlyingValue
-            );
-            emit AdminFeePaid(feeRecipient, adminAmt);
-            emit CallerFeePaid(msg.sender, callerAmt);
-            lastaUSTBalance = getTrueUnderlyingBalance();
-            lastUSTBalance = _getUSTaUST() * lastaUSTBalance / 1e18;
-        }
-     }
+        lastReinvestTime = block.timestamp;
 
+        uint256 profitInUnderlying = postCompoundUnderlyingValue -
+            preCompoundUnderlyingValue;
+        uint256 adminAmt = (profitInUnderlying * adminFee) / 10000;
+        uint256 callerAmt = (profitInUnderlying * callerFee) / 10000;
+        _triggerWithdrawAction(adminAmt + callerAmt);
+        SafeTransferLib.safeTransfer(underlying, feeRecipient, adminAmt);
+        SafeTransferLib.safeTransfer(underlying, msg.sender, callerAmt);
+        emit Reinvested(
+            msg.sender,
+            preCompoundUnderlyingValue,
+            postCompoundUnderlyingValue
+        );
+        emit AdminFeePaid(feeRecipient, adminAmt);
+        emit CallerFeePaid(msg.sender, callerAmt);
+        lastaUSTBalance = getUnderlyingBalance();
+        lastUSTBalance = (_getUSTaUST() * lastaUSTBalance) / 1e18;
+    }
 
     // Emergency withdraw in case of previously failed operations
     // Notice that this address is the Terra address of the token
@@ -415,16 +437,17 @@ contract aUSTVault is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
     // If something weird happens. Recoincile balances.
     function forceBalanceUpdate() external onlyOwner {
         lastaUSTBalance = underlying.balanceOf(address(this));
-        lastUSTBalance = _getUSTaUST() * underlying.balanceOf(address(this)) / 1e18;
+        lastUSTBalance =
+            (_getUSTaUST() * underlying.balanceOf(address(this))) /
+            1e18;
     }
 
     function compound() external nonReentrant returns (uint256) {
+        require(underlyingBalanceUpdate(), "stale aUST balance, not updated");
         return _compound();
     }
 
     fallback() external payable {
         return;
     }
-
-   
 }

@@ -9,25 +9,23 @@ import "src/integrations/compVault.sol";
 import "./TestERC20.sol";
 import "./Utils.sol";
 
-
 // This test covers integration for comp-like vaults
 
 contract TestcompVault is DSTest {
+    uint256 constant ADMINFEE = 100;
+    uint256 constant CALLERFEE = 10;
+    uint256 constant MAX_REINVEST_STALE = 1 hours;
+    uint256 constant MAX_INT = 2**256 - 1;
 
-    uint constant ADMINFEE=100;
-    uint constant CALLERFEE=10;
-    uint constant MAX_REINVEST_STALE= 1 hours;
-    uint constant MAX_INT= 2**256 - 1;
-
-    uint public MIN_FIRST_MINT;
-    uint public FIRST_DONATION;
-    uint public decimalCorrection;
+    uint256 public MIN_FIRST_MINT;
+    uint256 public FIRST_DONATION;
+    uint256 public decimalCorrection;
     Vm public constant vm = Vm(HEVM_ADDRESS);
 
     IERC20 constant USDC = IERC20(0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664); //USDC
     address constant usdcHolder = 0xCe2CC46682E9C6D5f174aF598fb4931a9c0bE68e;
     IERC20 constant WAVAX = IERC20(0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7); //WAVAX
-    address constant wavaxHolder = 0xBBff2A8ec8D702E61faAcCF7cf705968BB6a5baB; 
+    address constant wavaxHolder = 0xBBff2A8ec8D702E61faAcCF7cf705968BB6a5baB;
 
     IERC20 constant qUSDC = IERC20(0xBEb5d47A3f720Ec0a390d04b4d41ED7d9688bC7F); //USDC
     address constant qusdcHolder = 0xc5ed2333f8a2C351fCA35E5EBAdb2A82F5d254C3;
@@ -40,7 +38,8 @@ contract TestcompVault is DSTest {
     address constant aave = 0x4F01AeD16D97E3aB5ab2B501154DC9bb0F1A5A2C;
 
     compVault public vault;
-    uint public underlyingBalance;
+    uint256 public underlyingBalance;
+
     function setUp() public {
         vault = new compVault();
         vault.initialize(
@@ -52,10 +51,10 @@ contract TestcompVault is DSTest {
             MAX_REINVEST_STALE,
             address(WAVAX),
             0x486Af39519B4Dc9a7fCcd318217352830E8AD9b4
-            );
-        MIN_FIRST_MINT=vault.MIN_FIRST_MINT();
-        decimalCorrection = (10 ** (18-qUSDC.decimals()));
-        FIRST_DONATION=vault.FIRST_DONATION()/decimalCorrection;
+        );
+        MIN_FIRST_MINT = vault.MIN_FIRST_MINT();
+        decimalCorrection = (10**(18 - qUSDC.decimals()));
+        FIRST_DONATION = vault.FIRST_DONATION() / decimalCorrection;
         vault.setJoeRouter(joeRouter);
         vault.setAAVE(aave, address(0));
         vault.setApprovals(address(WAVAX), joeRouter, MAX_INT);
@@ -66,14 +65,54 @@ contract TestcompVault is DSTest {
 
         vault.setApprovals(address(USDC), address(qUSDC), MAX_INT);
         Router.Node[] memory _path = new Router.Node[](2);
-        _path[0] = Router.Node(joePair, 1, address(WAVAX), address(USDC), 0, 0, 0);
-        _path[1] = Router.Node(address(qUSDC), 7, address(USDC), address(qUSDC), 0, 0, 0);
+        _path[0] = Router.Node(
+            joePair,
+            1,
+            address(WAVAX),
+            address(USDC),
+            0,
+            0,
+            0
+        );
+        _path[1] = Router.Node(
+            address(qUSDC),
+            7,
+            address(USDC),
+            address(qUSDC),
+            0,
+            0,
+            0
+        );
         vault.setRoute(address(WAVAX), address(qUSDC), _path);
 
         Router.Node[] memory _path2 = new Router.Node[](3);
-        _path2[0] = Router.Node(QIWAVAX, 1, address(QI), address(WAVAX), 0, 0, 0);
-        _path2[1] = Router.Node(joePair, 1, address(WAVAX), address(USDC), 0, 0, 0);
-        _path2[2] = Router.Node(address(qUSDC), 7, address(USDC), address(qUSDC), 0, 0, 0);
+        _path2[0] = Router.Node(
+            QIWAVAX,
+            1,
+            address(QI),
+            address(WAVAX),
+            0,
+            0,
+            0
+        );
+        _path2[1] = Router.Node(
+            joePair,
+            1,
+            address(WAVAX),
+            address(USDC),
+            0,
+            0,
+            0
+        );
+        _path2[2] = Router.Node(
+            address(qUSDC),
+            7,
+            address(USDC),
+            address(qUSDC),
+            0,
+            0,
+            0
+        );
         vault.setRoute(address(QI), address(qUSDC), _path2);
 
         vm.startPrank(wavaxHolder);
@@ -85,81 +124,89 @@ contract TestcompVault is DSTest {
         vm.startPrank(qusdcHolder);
         qUSDC.transfer(address(this), qUSDC.balanceOf(qusdcHolder));
         vm.stopPrank();
-        
+
         vault.pushRewardToken(address(QI));
         vault.pushRewardToken(address(1));
 
         qUSDC.approve(address(vault), MAX_INT);
-        underlyingBalance=qUSDC.balanceOf(address(this));
+        underlyingBalance = qUSDC.balanceOf(address(this));
         // vm.warp(1647861775+10 days);
-        vm.warp(block.timestamp+10 days);
+        vm.warp(block.timestamp + 10 days);
     }
 
-
-    function testVanillaDepositOnly(uint96 amt) public returns (uint) {
+    function testVanillaDepositOnly(uint96 amt) public returns (uint256) {
         // uint amt = 1e18;
-        if (amt > underlyingBalance || amt<MIN_FIRST_MINT) {
+        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
             return 0;
         }
-        uint preBalance = vault.balanceOf(address(this));
+        uint256 preBalance = vault.balanceOf(address(this));
         vault.deposit(amt);
-        uint postBalance = vault.balanceOf(address(this))/decimalCorrection;
+        uint256 postBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
         console.log(postBalance);
         assertTrue(postBalance == preBalance + amt - FIRST_DONATION);
         return amt;
     }
 
     function testViewFuncs1(uint96 amt) public {
-        if (amt > underlyingBalance || amt<MIN_FIRST_MINT) {
+        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
             return;
         }
-        assertTrue(vault.receiptPerUnderlying() == 1e18*decimalCorrection);
+        assertTrue(vault.receiptPerUnderlying() == 1e18 * decimalCorrection);
         assertTrue(vault.underlyingPerReceipt() == 10**qUSDC.decimals());
         assertTrue(vault.totalSupply() == 0);
         vault.deposit(amt);
-        assertTrue(vault.totalSupply() == amt*decimalCorrection);
-        assertTrue(vault.receiptPerUnderlying() == 1e18*decimalCorrection);
+        assertTrue(vault.totalSupply() == amt * decimalCorrection);
+        assertTrue(vault.receiptPerUnderlying() == 1e18 * decimalCorrection);
         assertTrue(vault.underlyingPerReceipt() == 10**qUSDC.decimals());
     }
 
-
     function testVanillaDepositNredeem(uint96 amt) public {
-        if (amt > underlyingBalance || amt<MIN_FIRST_MINT) {
+        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
             return;
         }
         vault.deposit(amt);
-        uint preBalanceVault = vault.balanceOf(address(this))/decimalCorrection;
-        uint preBalanceToken = qUSDC.balanceOf(address(this));
-        vault.redeem(preBalanceVault*decimalCorrection);
-        uint postBalanceVault = vault.balanceOf(address(this));
-        uint postBalanceToken = qUSDC.balanceOf(address(this));
+        uint256 preBalanceVault = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        uint256 preBalanceToken = qUSDC.balanceOf(address(this));
+        vault.redeem(preBalanceVault * decimalCorrection);
+        uint256 postBalanceVault = vault.balanceOf(address(this));
+        uint256 postBalanceToken = qUSDC.balanceOf(address(this));
         console.log(postBalanceVault, preBalanceVault);
         console.log(postBalanceToken, preBalanceToken);
         assertTrue(postBalanceVault == 0);
         assertTrue(postBalanceToken == preBalanceToken + amt - FIRST_DONATION);
     }
-    function testVanillaDepositNCompoundOnly(uint96 amt) public returns (uint) {
+
+    function testVanillaDepositNCompoundOnly(uint96 amt)
+        public
+        returns (uint256)
+    {
         // uint amt = 1e18;
-        if (amt > underlyingBalance || amt<MIN_FIRST_MINT) {
+        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
             return 0;
         }
         vault.deposit(amt);
-        uint preBalance = qUSDC.balanceOf(address(vault));
-        vm.warp(block.timestamp+100 days);
+        uint256 preBalance = qUSDC.balanceOf(address(vault));
+        vm.warp(block.timestamp + 100 days);
         vault.compound();
-        uint postBalance = qUSDC.balanceOf(address(vault));
+        uint256 postBalance = qUSDC.balanceOf(address(vault));
         console.log(preBalance);
         console.log(postBalance);
         assertTrue(postBalance > preBalance);
         return amt;
     }
-    function testVanillaDepositNCompoundredeem(uint96 amt) public returns (uint) {
+
+    function testVanillaDepositNCompoundredeem(uint96 amt)
+        public
+        returns (uint256)
+    {
         // uint amt = 1e18;
-        if (amt > underlyingBalance || amt<MIN_FIRST_MINT) {
+        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
             return 0;
         }
         vault.deposit(amt);
-        vm.warp(block.timestamp+100 days);
+        vm.warp(block.timestamp + 100 days);
         vault.compound();
         vault.redeem(vault.balanceOf(address(this)));
         assertTrue(amt < qUSDC.balanceOf(address(this)));
