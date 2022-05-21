@@ -45,7 +45,8 @@ contract TestanchorVault is DSTest {
             address(AUST),
             address(pricefeed),
             address(xAnchor),
-            address(UST)
+            address(UST),
+            true
         );
         MIN_FIRST_MINT = 1e18;
         decimalCorrection = (10**(18 - AUST.decimals()));
@@ -57,87 +58,282 @@ contract TestanchorVault is DSTest {
         vm.startPrank(ustHolder);
         UST.transfer(address(this), UST.balanceOf(ustHolder));
         vm.stopPrank();
-        underlyingBalance = AUST.balanceOf(address(this));
+        underlyingBalance = UST.balanceOf(address(this));
         vm.warp(block.timestamp + 10 days);
         UST.approve(address(vault), MAX_INT);
         // Transfers of AUST will be simulated to test different timings/cases
     }
 
-    function testVanillaDeposit(uint96 amt) public returns (uint256) {
-        if (amt > underlyingBalance || amt < MIN_FIRST_MINT) {
-            return 0;
-        }
+    function testVanillaDepositUST() public returns (uint256) {
+        uint256 amt = 10**9;
         uint256 preBalance = vault.balanceOf(address(this));
         vault.deposit(amt);
         uint256 postBalance = vault.balanceOf(address(this)) /
             decimalCorrection;
-
-        console.log(postBalance);
-        console.log(preBalance + amt - FIRST_DONATION);
         assertTrue(postBalance == preBalance + amt - FIRST_DONATION);
         return amt;
     }
 
     // Here the value should return as expected
-    function testTwoVanillaDeposits(uint96 amt) public returns (uint256) {
-        return 0;
+    function testTwoVanillaDepositsUST(uint256 amt) public returns (uint256) {
+        if (amt > UST.balanceOf(address(this)) || amt == 0) {
+            return 0;
+        }
+        uint256 initAmt = 10**9;
+        uint256 preBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(postBalance == preBalance + initAmt - FIRST_DONATION);
+
+        // Simulating wormhole transfer
+        uint256 aUSTSimulatedAmount = (initAmt * vault._getUSTaUST()) / 1e18;
+        AUST.transfer(address(vault), aUSTSimulatedAmount);
+
+        // Second Deposit after wormhole transfer
+        preBalance = vault.balanceOf(address(this));
+        vault.deposit(amt);
+        postBalance = vault.balanceOf(address(this)) / decimalCorrection;
+        assertTrue(postBalance == preBalance + amt);
     }
 
-    // Here the case where the aUST isn't recieved by the second deposit should
-    // be tested. This would be an expected failurre.
-    function testOneVanillaOneBadDeposits(uint96 amt) public returns (uint256) {
-        return 0;
-    }
-
-    // Here the deposit and redeem should be as expected
-    function testOneVanillaDepositOneRedeem(uint96 amt)
+    function testOneVanillaDepositOneFullRedeemUST(uint96 amt)
         public
         returns (uint256)
     {
-        return 0;
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // Simulating wormhole transfer
+        uint256 aUSTSimulatedAmount = (initAmt * vault._getUSTaUST()) / 1e18;
+        AUST.transfer(address(vault), aUSTSimulatedAmount);
+
+        uint256 preaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 preaUSTBalanceUser = AUST.balanceOf(address(this));
+        preTokenBalance = postTokenBalance;
+        vault.redeem(preTokenBalance * decimalCorrection);
+        uint256 postaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 postaUSTBalanceUser = AUST.balanceOf(address(this));
+
+        postTokenBalance = vault.balanceOf(address(this)) / decimalCorrection;
+        assertTrue(
+            preaUSTBalanceUser + (preaUSTBalanceVault - postaUSTBalanceVault) ==
+                postaUSTBalanceUser
+        );
+        assertTrue(postTokenBalance == 0);
     }
 
-    // Here the deposit should go as expected, but the redeem should take place
-    // before the aUST is recieved and should be an expected failure.
-    function testOneVanillaDepositOneBadRedeem(uint96 amt)
+    function testOneVanillaDepositOnePartialRedeemUST(uint96 amt)
         public
         returns (uint256)
     {
-        return 0;
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // Simulating wormhole transfer
+        uint256 aUSTSimulatedAmount = (initAmt * vault._getUSTaUST()) / 1e18;
+        AUST.transfer(address(vault), aUSTSimulatedAmount);
+
+        if (amt == 0 || amt > postTokenBalance) {
+            return 0;
+        }
+
+        uint256 preaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 preaUSTBalanceUser = AUST.balanceOf(address(this));
+        preTokenBalance = postTokenBalance;
+        vault.redeem(amt * decimalCorrection);
+        uint256 postaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 postaUSTBalanceUser = AUST.balanceOf(address(this));
+
+        postTokenBalance = vault.balanceOf(address(this)) / decimalCorrection;
+        assertTrue(
+            preaUSTBalanceUser + (preaUSTBalanceVault - postaUSTBalanceVault) ==
+                postaUSTBalanceUser
+        );
+        assertTrue(postTokenBalance == preTokenBalance - amt);
     }
 
     // Here the deposit and compound should go as expected.
-    function testOneVanillaDepositOneCompound(uint96 amt)
+    function testOneVanillaDepositOneCompoundUSTS(uint96 amt)
         public
         returns (uint256)
     {
-        return 0;
-    }
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
 
-    // The compound should occur before the aUST is receieved. Expected failure.
-    function testOneVanillaDepositOneBadCompound(uint96 amt)
-        public
-        returns (uint256)
-    {
-        return 0;
+        // Simulating wormhole transfer
+        uint256 aUSTSimulatedAmount = (initAmt * vault._getUSTaUST()) / 1e18;
+        AUST.transfer(address(vault), aUSTSimulatedAmount);
+
+        uint256 preBalanceInUST = AUST.balanceOf(address(vault));
+        vm.warp(block.timestamp + 100 days);
+        vault.setMockPriceFeed(1e18 * 2); // Over time more UST for 1 AUST (yield)
+        vault.compound();
+        uint256 postBalanceInUST = AUST.balanceOf(address(vault)) * 2;
+        assertTrue(postBalanceInUST > preBalanceInUST);
+        return amt;
     }
 
     // There should be no out of the ordinary behavior. The balance should compound
     // after the deposit and should then be redeemed.
-    function testOneVanillaDepositOneCompoundOneRedeem(uint96 amt)
+    function testOneVanillaDepositOneCompoundOneRedeemUST(uint96 amt)
         public
         returns (uint256)
     {
-        return 0;
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // Simulating wormhole transfer
+        uint256 aUSTSimulatedAmount = (initAmt * vault._getUSTaUST()) / 1e18;
+        AUST.transfer(address(vault), aUSTSimulatedAmount);
+
+        vm.warp(block.timestamp + 100 days);
+        vault.compound();
+        uint256 preaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 preaUSTBalanceUser = AUST.balanceOf(address(this));
+        preTokenBalance = postTokenBalance;
+        vault.redeem(preTokenBalance * decimalCorrection);
+        uint256 postaUSTBalanceVault = AUST.balanceOf(address(vault));
+        uint256 postaUSTBalanceUser = AUST.balanceOf(address(this));
+
+        postTokenBalance = vault.balanceOf(address(this)) / decimalCorrection;
+        assertTrue(
+            preaUSTBalanceUser + (preaUSTBalanceVault - postaUSTBalanceVault) ==
+                postaUSTBalanceUser
+        );
+        assertTrue(postTokenBalance == 0);
     }
 
-    // The compound should occur before the aUST is receieved. Expected failure.
-    // But upon the redeem the aUST is receieved and the compound is handled. This
-    // should end with the same overall balances as the above test.
-    function testOneVanillaDepositOneBadCompoundOneRedeem(uint96 amt)
+    /* THESE TESTS ARE EXPECTED TO FAIL */
+
+    // Here the case where the aUST isn't recieved by the second deposit should
+    // be tested. This would be an expected failure.
+    function testOneVanillaOneBadDepositFromNoRecFunds(uint96 amt)
         public
         returns (uint256)
     {
-        return 0;
+        if (amt > UST.balanceOf(address(this)) || amt == 0) {
+            return 0;
+        }
+        uint256 initAmt = 10**9;
+        uint256 preBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(postBalance == preBalance + initAmt - FIRST_DONATION);
+
+        // Here we are assuming there is no aUST received between the two deposits
+
+        vault.deposit(amt);
+    }
+
+    // Here the case where the aUST is sent by some actor trying to get past the lock
+    // this test should be expected to fail.
+    function testOneVanillaOneBadDepositFromMicroDeposit(uint96 amt)
+        public
+        returns (uint256)
+    {
+        if (amt > UST.balanceOf(address(this)) || amt == 0) {
+            return 0;
+        }
+        uint256 initAmt = 10**9;
+        uint256 preBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(postBalance == preBalance + initAmt - FIRST_DONATION);
+
+        // Here we are assuming that there is some kind of actor trying to bypass
+        // the lock
+        AUST.transfer(address(vault), 1);
+
+        // Second Deposit after micro-deposit
+        vault.deposit(amt);
+    }
+
+    // Here the deposit should go as expected, but the redeem should take place
+    // before the aUST is recieved and should be an expected failure.
+    function testOneVanillaDepositOneBadRedeemFromNoRecFunds(uint96 amt)
+        public
+        returns (uint256)
+    {
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // No wormhole transfer
+
+        vault.redeem(preTokenBalance * decimalCorrection);
+    }
+
+    // Here the deposit should go as expected, but the redeem should take place
+    // before the aUST is recieved and should be an expected failure.
+    function testOneVanillaDepositOneBadRedeemFromMicroDeposit(uint96 amt)
+        public
+        returns (uint256)
+    {
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // Here we are assuming that there is some kind of actor trying to bypass
+        // the lock
+        AUST.transfer(address(vault), 1);
+
+        vault.redeem(preTokenBalance * decimalCorrection);
+    }
+
+    // The compound should occur before the aUST is receieved.
+    function testOneVanillaDepositOneBadCompound(uint96 amt)
+        public
+        returns (uint256)
+    {
+        uint256 initAmt = 10**9;
+        uint256 preTokenBalance = vault.balanceOf(address(this));
+        vault.deposit(initAmt);
+        uint256 postTokenBalance = vault.balanceOf(address(this)) /
+            decimalCorrection;
+        assertTrue(
+            postTokenBalance == preTokenBalance + initAmt - FIRST_DONATION
+        );
+
+        // No wormhole transfer
+
+        vm.warp(block.timestamp + 1 days);
+        vault.compound();
     }
 }

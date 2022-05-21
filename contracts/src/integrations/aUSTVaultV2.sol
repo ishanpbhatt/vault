@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.10;
 
+import "forge-std/console.sol";
+
 import "src/Vault.sol";
 import {IxAnchor} from "src/interfaces/IxAnchor.sol";
 import {AggregatorV3Interface} from "src/interfaces/AggregatorV3Interface.sol";
@@ -36,8 +38,8 @@ contract aUSTVault is
 
     // Min swap to rid of edge cases with untracked rewards for small deposits.
     uint256 public constant MIN_SWAP = 1e16;
-    uint256 public constant MIN_FIRST_MINT = 1e12; // Require substantial first mint to prevent exploits from rounding errors
-    uint256 public constant FIRST_DONATION = 1e8; // Lock in first donation to prevent exploits from rounding errors
+    uint256 public constant MIN_FIRST_MINT = 1e8; // Require substantial first mint to prevent exploits from rounding errors
+    uint256 public constant FIRST_DONATION = 1e6; // Lock in first donation to prevent exploits from rounding errors
 
     uint256 public underlyingDecimal; //decimal of underlying token
     ERC20 public underlying; // the underlying token
@@ -50,6 +52,10 @@ contract aUSTVault is
     uint256 public callerFee; // Fee in bps paid out to caller on each reinvest
     address public BOpsAddress;
     IWAVAX public WAVAX;
+
+    // Variables used for testing
+    bool isMock;
+    uint256 public mockPriceFeed;
 
     event Reinvested(address caller, uint256 preCompound, uint256 postCompound);
     event CallerFeePaid(address caller, uint256 amount);
@@ -93,13 +99,18 @@ contract aUSTVault is
     /* @dev aUST balances are accounted for by balanceOf() calls and can be trusted
     because users can only interact with compounding, depositing, and redeeming iff
     the balance is greater than the last recorded aUST balance before recieving 
-    aUST from the bridge. */
+    aUST from the bridge. We track the expectedAUSTBalance to ensure that no one
+    is transfering small quantities of UST in order to get past the lock. */
     uint256 public lastaUSTBalance;
     bool public isaUSTBalanceUpdated;
+    uint256 public expectedaUSTBalance;
 
     ///////////////////////////////////////////////////////////////////////////////
     uint256 internal constant MAX_INT =
         115792089237316195423570985008687907853269984665640564039457584007913129639935;
+
+    uint256 internal constant SLIPPAGE_NUMERATOR = 95;
+    uint256 internal constant SLIPPEAGE_DENOMINATOR = 100;
 
     function initialize(
         address _underlying, // UST
@@ -111,7 +122,8 @@ contract aUSTVault is
         address _WAVAX,
         address _xanchor,
         address _pricefeed,
-        address _UST
+        address _UST,
+        bool _isMock
     ) public initializer {
         __Ownable_init();
         __ReentrancyGuard_init();
@@ -129,6 +141,9 @@ contract aUSTVault is
         UST.approve(_xanchor, MAX_INT);
 
         isaUSTBalanceUpdated = true;
+
+        isMock = _isMock;
+        mockPriceFeed = 1e18; // 1e18 is the default exchange
     }
 
     // Sets fee
@@ -163,8 +178,17 @@ contract aUSTVault is
         return underlying.balanceOf(address(this));
     }
 
+    /* For testing purposes only */
+    function setMockPriceFeed(uint256 price) public {
+        mockPriceFeed = price;
+    }
+
     /* Returns how much UST 1e18 aUST is worth */
-    function _getUSTaUST() internal view returns (uint256) {
+    //function _getUSTaUST() internal view returns (uint256) {
+    function _getUSTaUST() public view returns (uint256) {
+        if (isMock) {
+            return mockPriceFeed;
+        }
         (
             ,
             /*uint80 roundID*/
@@ -195,9 +219,19 @@ contract aUSTVault is
     }
 
     // Checks if aUST balance is stale using previous state and updates if state
-    // is incorrect preventing deposits/withdrawls in case of stale balance.
+    // is incorrect preventing deposits/withdrawls in case of stale balance. The
+    // balance must equal at least 95% of what's expected. This percentage can be
+    // varied is as a PoC of how to handle malicious users trying to get better
+    // rates via false micro deposits. We also leverage short circuiting so the check
+    // doesn't unnecesarily get done every time a deposit or withdrawal is made.
     function underlyingBalanceUpdate() public returns (bool) {
-        if (isaUSTBalanceUpdated || getUnderlyingBalance() > lastaUSTBalance) {
+        uint256 balance = getUnderlyingBalance();
+        if (
+            isaUSTBalanceUpdated ||
+            (balance > lastaUSTBalance &&
+                balance * SLIPPEAGE_DENOMINATOR >
+                expectedaUSTBalance * SLIPPAGE_NUMERATOR)
+        ) {
             isaUSTBalanceUpdated = true;
             return true;
         }
@@ -213,6 +247,7 @@ contract aUSTVault is
     {
         require(_amt > 0, "0 tokens");
         require(underlyingBalanceUpdate(), "aUST balances are stale");
+
         // Reinvest if it has been a while since last reinvest
         if (block.timestamp > lastReinvestTime + maxReinvestStale) {
             _compound();
@@ -227,6 +262,7 @@ contract aUSTVault is
         require(receiptTokens != 0, "0 received");
 
         SafeTransferLib.safeTransferFrom(UST, msg.sender, address(this), _amt);
+        lastUSTBalance += _amt; // We no longer need to accrue interest here
         _triggerDepositAction(_amt);
         _mint(_to, receiptTokens);
         emit Deposit(msg.sender, _to, _amt, receiptTokens);
@@ -292,7 +328,7 @@ contract aUSTVault is
         nonReentrant
         returns (uint256 amtToReturn)
     {
-        // require(_amt > 0, "0 tokens");
+        require(_amt > 0, "0 tokens");
         require(underlyingBalanceUpdate(), "aUST balances are stale");
         if (block.timestamp > lastReinvestTime + maxReinvestStale) {
             _compound();
@@ -300,7 +336,9 @@ contract aUSTVault is
         amtToReturn = (underlyingPerReceipt() * _amt) / 1e18;
         _triggerWithdrawAction(amtToReturn);
         _burn(msg.sender, _amt);
+
         SafeTransferLib.safeTransfer(underlying, _to, amtToReturn);
+
         emit Withdraw(msg.sender, _to, msg.sender, amtToReturn, _amt);
     }
 
@@ -389,14 +427,15 @@ contract aUSTVault is
     }
 
     function _triggerDepositAction(uint256 amtOfUnderlying) internal {
-        uint256 rate = _getUSTaUST();
         isaUSTBalanceUpdated = false;
         lastaUSTBalance = getUnderlyingBalance();
+        expectedaUSTBalance =
+            lastaUSTBalance +
+            ((amtOfUnderlying * 1e18) / _getUSTaUST());
 
-        /* One of two places where UST interest accrual is updated. 
-        Ensures monotonic increases because aUST guaranteed to be updated */
-        lastUSTBalance = (_getUSTaUST() * lastaUSTBalance) / 1e18;
-        //xAnchor.depositStable(address(UST), amtOfUnderlying);
+        if (!isMock) {
+            xAnchor.depositStable(address(UST), amtOfUnderlying);
+        }
     }
 
     function _triggerWithdrawAction(uint256 amtToReturn) internal {
@@ -407,11 +446,11 @@ contract aUSTVault is
     function _compound() internal returns (uint256) {
         uint256 preCompoundUnderlyingValue = _getValueOfUnderlyingPre();
         uint256 postCompoundUnderlyingValue = _getValueOfUnderlyingPost();
-
         lastReinvestTime = block.timestamp;
 
         uint256 profitInUnderlying = postCompoundUnderlyingValue -
             preCompoundUnderlyingValue;
+
         uint256 adminAmt = (profitInUnderlying * adminFee) / 10000;
         uint256 callerAmt = (profitInUnderlying * callerFee) / 10000;
         _triggerWithdrawAction(adminAmt + callerAmt);
